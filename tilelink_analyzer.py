@@ -942,8 +942,8 @@ class TileLinkAnalyzer:
         
         # Transaction Statistics section
         output.append("=== Transaction Statistics ===")
-        output.append(f"Total transactions: {results['stats']['totalTransactions']}")
-        output.append(f"Complete transactions: {results['stats']['completeTransactions']}")
+        output.append(f"Total A-Channel transactions: {results['stats']['totalTransactions']}")
+        output.append(f"Complete A-Channel transactions: {results['stats']['completeTransactions']}")
         
         output.append("\nChannel operations:")
         output.append(f"A-Channel: {results['stats']['aChannelOps']}")
