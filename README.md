@@ -1,6 +1,8 @@
 # TileLink Protocol Analyzer
 
 一个用于分析和验证TileLink总线协议日志的强大工具。TileLink是RISC-V架构中使用的一种可缓存且一致性的内存总线协议。本分析器可帮助硬件设计师和系统验证工程师分析TileLink通信、检测违规、跟踪缓存状态变化，从而加速调试过程。
+html version: TileLinkProtocolAnalyzer.html
+python version: tilelink_analyzer.py
 
 ## 功能特点
 
