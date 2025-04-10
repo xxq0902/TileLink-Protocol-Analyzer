@@ -1,0 +1,1388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TileLink Protocol Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#5D5CDE',
+                    }
+                }
+            }
+        }
+        
+        // Check for dark mode preference
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+        }
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+            if (event.matches) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        });
+    </script>
+</head>
+<body class="bg-white dark:bg-gray-900 text-gray-800 dark:text-gray-200 min-h-screen">
+    <div class="container mx-auto p-4 max-w-4xl">
+        <h1 class="text-2xl font-bold text-primary mb-6">TileLink Protocol Analyzer</h1>
+        
+        <div class="mb-6">
+            <label for="logInput" class="block mb-2 font-medium">Paste TileLink Log Data:</label>
+            <textarea id="logInput" rows="10" class="w-full p-3 border rounded-md bg-gray-50 dark:bg-gray-800 dark:border-gray-700 text-base" placeholder="Paste your TileLink log here..."></textarea>
+        </div>
+        
+        <div class="flex flex-wrap gap-4 mb-6">
+            <button id="analyzeBtn" class="px-4 py-2 bg-primary text-white rounded-md hover:bg-opacity-90 transition-colors">
+                Analyze Log
+            </button>
+            <button id="clearBtn" class="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-md hover:bg-opacity-90 transition-colors">
+                Clear
+            </button>
+            <button id="exampleBtn" class="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-md hover:bg-opacity-90 transition-colors">
+                Load Example
+            </button>
+        </div>
+        
+        <div id="loadingIndicator" class="hidden flex items-center justify-center my-4">
+            <div class="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+            <span class="ml-2">Analyzing...</span>
+        </div>
+        
+        <div id="resultsContainer" class="hidden">
+            <h2 class="text-xl font-semibold mb-4">Analysis Results</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div class="p-4 bg-gray-100 dark:bg-gray-800 rounded-md">
+                    <h3 class="font-semibold mb-2">Transaction Statistics</h3>
+                    <ul id="statsList" class="space-y-1"></ul>
+                </div>
+                <div class="p-4 bg-gray-100 dark:bg-gray-800 rounded-md">
+                    <h3 class="font-semibold mb-2">Protocol Compliance</h3>
+                    <div id="complianceStatus" class="font-semibold"></div>
+                </div>
+            </div>
+            
+            <div id="violationsContainer" class="hidden">
+                <h3 class="font-semibold mb-2">Protocol Violations</h3>
+                <div class="bg-red-50 dark:bg-red-900/20 p-4 rounded-md">
+                    <ul id="violationsList" class="list-disc pl-5 space-y-1"></ul>
+                </div>
+            </div>
+            
+            <div id="transactionsContainer" class="mt-6">
+                <h3 class="font-semibold mb-2">Transaction Log</h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-md">
+                        <thead>
+                            <tr class="bg-gray-100 dark:bg-gray-700">
+                                <th class="px-4 py-2 text-left">Time (ns)</th>
+                                <th class="px-4 py-2 text-left">Hart</th>
+                                <th class="px-4 py-2 text-left">Channel</th>
+                                <th class="px-4 py-2 text-left">Operation</th>
+                                <th class="px-4 py-2 text-left">Address</th>
+                                <th class="px-4 py-2 text-left">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transactionsTable" class="divide-y dark:divide-gray-700"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class TileLinkTransaction {
+            constructor(request = null) {
+                this.request = request;       // A-Channel request
+                this.responses = [];          // D-Channel responses
+                this.ack = null;              // E-Channel acknowledgment
+            }
+            
+            isComplete() {
+                return this.request && this.responses.length > 0 && this.ack;
+            }
+        }
+
+        class TileLinkAnalyzer {
+            constructor() {
+                // Transactions tracking
+                this.transactions = [];
+                this.parsedTransactions = [];
+                
+                // Outstanding operations tracking by transaction type
+                this.outstandingRequests = new Map(); // hart -> source -> addr -> transaction (A-channel requests)
+                this.outstandingGrants = new Map();   // hart -> sink -> transaction (D-channel grants)
+                this.outstandingProbes = new Map();   // hart -> addr -> transaction (B-channel probes)
+                this.outstandingReleases = new Map(); // hart -> source -> addr -> transaction (C-channel releases)
+                
+                // Cache state by hart and address
+                this.cacheStates = new Map(); // hart -> addr -> state
+                
+                // Cache state history for better analysis
+                this.cacheStateHistory = new Map(); // hart -> addr -> [state transitions]
+                
+                // Protocol violations
+                this.violations = [];
+                
+                // Statistics
+                this.stats = {
+                    totalTransactions: 0,
+                    completeTransactions: 0,
+                    
+                    // Channel operation counts
+                    aChannelOps: 0,
+                    bChannelOps: 0,
+                    cChannelOps: 0,
+                    dChannelOps: 0,
+                    eChannelOps: 0,
+                    
+                    // Operation categories (top level)
+                    accessOps: 0,
+                    hintOps: 0,
+                    transferOps: 0,
+                    
+                    // Access operations
+                    putOps: 0,    // PutFullData, PutPartialData
+                    getOps: 0,    // Get
+                    atomicOps: 0, // ArithmeticData, LogicalData
+                    
+                    // Specific operations
+                    putFullDataOps: 0,
+                    putPartialDataOps: 0,
+                    getRequestOps: 0,
+                    arithmeticDataOps: 0,
+                    logicalDataOps: 0,
+                    intentOps: 0,
+                    
+                    // Transfer operations
+                    acquireOps: 0,  // AcquireBlock, AcquirePerm
+                    probeOps: 0,    // ProbeBlock, ProbePerm
+                    releaseOps: 0,  // Release, ReleaseData
+                    
+                    // Specific transfer operations
+                    acquireBlockOps: 0,
+                    acquirePermOps: 0,
+                    probeBlockOps: 0,
+                    probePermOps: 0,
+                    releaseWithoutDataOps: 0,
+                    releaseWithDataOps: 0,
+                    
+                    // Response operations
+                    accessAckOps: 0,
+                    accessAckDataOps: 0,
+                    hintAckOps: 0,
+                    grantOps: 0,
+                    grantDataOps: 0,
+                    probeAckOps: 0,
+                    probeAckDataOps: 0,
+                    releaseAckOps: 0,
+                    grantAckOps: 0
+                };
+            }
+            
+            parseLogLine(line) {
+                // Parse time and hart
+                const timeHartMatch = line.match(/(\d+\.\d+)\s+ns\s+(Hart\d+):\s+(.*)/);
+                if (!timeHartMatch) return null;
+                
+                const [_, timestamp, hart, message] = timeHartMatch;
+                
+                // Parse channel and operation
+                const channelOpMatch = message.match(/([A-E]-Channel):\s+(\w+)\s+-\s+(.*)/);
+                if (!channelOpMatch) return null;
+                
+                const [__, channel, operation, params] = channelOpMatch;
+                
+                // Parse common parameters
+                const paramDict = {};
+                
+                // Extract address
+                const addrMatch = params.match(/addr:(0x[0-9a-f]+)/);
+                if (addrMatch) paramDict.addr = addrMatch[1];
+                
+                // Extract source
+                const sourceMatch = params.match(/source:(\d+)/);
+                if (sourceMatch) paramDict.source = parseInt(sourceMatch[1]);
+                
+                // Extract sink for D and E channels
+                const sinkMatch = params.match(/sink:(\d+)/);
+                if (sinkMatch) paramDict.sink = parseInt(sinkMatch[1]);
+                
+                // Extract size
+                const sizeMatch = params.match(/size:(\d+)/);
+                if (sizeMatch) paramDict.size = parseInt(sizeMatch[1]);
+                
+                // Extract data for D-Channel
+                const dataMatch = params.match(/data:(0x[0-9a-f]+)/);
+                if (dataMatch) paramDict.data = dataMatch[1];
+                
+                // Extract cache state transition for A-Channel
+                const growthMatch = params.match(/(NtoB|NtoT|BtoT|TtoB|TtoN|BtoN)\s+\((\d+)\)/);
+                if (growthMatch) {
+                    paramDict.growth = growthMatch[1];
+                    paramDict.param = parseInt(growthMatch[2]);
+                }
+                
+                // Extract permission cap for D/B channel operations
+                const capMatch = params.match(/(toB|toT|toN)\s+\((\d+)\)/);
+                if (capMatch && !paramDict.growth) {
+                    paramDict.cap = capMatch[1];
+                    paramDict.param = parseInt(capMatch[2]);
+                }
+                
+                // Extract way for A-Channel
+                const wayMatch = params.match(/way:(\d+)/);
+                if (wayMatch) paramDict.way = parseInt(wayMatch[1]);
+                
+                // Extract corrupt flag
+                const corruptMatch = params.match(/corrupt:(\d+)/);
+                if (corruptMatch) paramDict.corrupt = parseInt(corruptMatch[1]);
+                
+                // Extract shareable flag
+                const shareableMatch = params.match(/shareable:(\d+)/);
+                if (shareableMatch) paramDict.shareable = parseInt(shareableMatch[1]);
+                
+                // Extract user field
+                const userMatch = params.match(/user:(0x[0-9a-f]+)/);
+                if (userMatch) paramDict.user = userMatch[1];
+                
+                // Create transaction record
+                const transaction = {
+                    timestamp: parseFloat(timestamp),
+                    hart,
+                    channel,
+                    operation,
+                    params: paramDict,
+                    rawParams: params,
+                };
+                
+                // Add to parsed transactions for display
+                this.parsedTransactions.push(transaction);
+                
+                // Update channel operation statistics
+                if (channel === "A-Channel") this.stats.aChannelOps++;
+                else if (channel === "B-Channel") this.stats.bChannelOps++;
+                else if (channel === "C-Channel") this.stats.cChannelOps++;
+                else if (channel === "D-Channel") this.stats.dChannelOps++;
+                else if (channel === "E-Channel") this.stats.eChannelOps++;
+                
+                return transaction;
+            }
+            
+            getHartMap(maps, hart) {
+                if (!maps.has(hart)) {
+                    maps.set(hart, new Map());
+                }
+                return maps.get(hart);
+            }
+            
+            getSourceMap(hartMap, source) {
+                if (!hartMap.has(source)) {
+                    hartMap.set(source, new Map());
+                }
+                return hartMap.get(source);
+            }
+            
+            // Helper for updating cache state from a ProbeAck/ProbeAckData response
+            updateCacheStateFromProbe(hart, addr, growth) {
+                if (!growth) return;
+                
+                // Get cache state map for this hart
+                if (!this.cacheStates.has(hart)) {
+                    this.cacheStates.set(hart, new Map());
+                }
+                const hartCacheStates = this.cacheStates.get(hart);
+                
+                // Setup cache state history for this hart/address
+                if (!this.cacheStateHistory.has(hart)) {
+                    this.cacheStateHistory.set(hart, new Map());
+                }
+                if (!this.cacheStateHistory.get(hart).has(addr)) {
+                    this.cacheStateHistory.get(hart).set(addr, []);
+                }
+                const stateHistory = this.cacheStateHistory.get(hart).get(addr);
+                
+                // Get current state for this address in this hart
+                const currentState = hartCacheStates.get(addr) || 'None';
+                
+                // Update state based on ProbeAck response
+                const newStateMap = {
+                    'BtoN': 'None',  // Downgrade Branch to None
+                    'TtoN': 'None',  // Downgrade Trunk to None
+                    'TtoB': 'Branch' // Downgrade Trunk to Branch
+                };
+                
+                if (newStateMap[growth]) {
+                    // Log the state transition in history
+                    stateHistory.push({
+                        timestamp: Date.now(), // Using current time as transaction time not available here
+                        oldState: currentState,
+                        newState: newStateMap[growth],
+                        operation: `ProbeAck/ProbeAckData - ${growth}`,
+                        channel: "C-Channel"
+                    });
+                    
+                    // Update current state
+                    hartCacheStates.set(addr, newStateMap[growth]);
+                }
+            }
+            
+            // Helper for handling Release/ReleaseData operations  
+            handleReleaseOperation(hart, addr, source, transaction, growth) {
+                // Create transaction for tracking
+                const newTxn = { 
+                    request: transaction,
+                    response: null
+                };
+                
+                // Track this release operation                        
+                // Store outstanding release
+                const hartMap = this.getHartMap(this.outstandingReleases, hart);
+                const sourceMap = this.getSourceMap(hartMap, source);
+                sourceMap.set(addr, newTxn);
+                
+                // Update cache state based on Release's growth parameter
+                if (growth) {
+                    // Get cache state map for this hart
+                    if (!this.cacheStates.has(hart)) {
+                        this.cacheStates.set(hart, new Map());
+                    }
+                    const hartCacheStates = this.cacheStates.get(hart);
+                    
+                    // Setup cache state history for this hart/address
+                    if (!this.cacheStateHistory.has(hart)) {
+                        this.cacheStateHistory.set(hart, new Map());
+                    }
+                    if (!this.cacheStateHistory.get(hart).has(addr)) {
+                        this.cacheStateHistory.get(hart).set(addr, []);
+                    }
+                    const stateHistory = this.cacheStateHistory.get(hart).get(addr);
+                    
+                    // Get current state for this address in this hart
+                    const currentState = hartCacheStates.get(addr) || 'None';
+                    
+                    // Update state based on Release growth parameter
+                    const newStateMap = {
+                        'TtoB': 'Branch', // Downgrade Trunk to Branch
+                        'TtoN': 'None',   // Downgrade Trunk to None
+                        'BtoN': 'None'    // Downgrade Branch to None
+                    };
+                    
+                    if (newStateMap[growth]) {
+                        // Log the state transition in history
+                        stateHistory.push({
+                            timestamp: transaction.timestamp,
+                            oldState: currentState,
+                            newState: newStateMap[growth],
+                            operation: `${transaction.operation} - ${growth}`,
+                            channel: transaction.channel
+                        });
+                        
+                        // Update current state
+                        hartCacheStates.set(addr, newStateMap[growth]);
+                    }
+                }
+            }
+            
+            // Helper for handling D-Channel AccessAck/AccessAckData/HintAck responses
+            handleGenericDResponse(hart, source, transaction, operationType) {
+                // Find matching A-Channel request using source ID
+                let matchingTxn = null;
+                let matchingAddr = null;
+                
+                if (this.outstandingRequests.has(hart) && 
+                    this.outstandingRequests.get(hart).has(source)) {
+                    
+                    const sourceMap = this.outstandingRequests.get(hart).get(source);
+                    // Find the first request with this source ID
+                    if (sourceMap.size > 0) {
+                        for (const [addr, txn] of sourceMap) {
+                            // Check if this is the type of request we're looking for
+                            const reqOp = txn.request.operation;
+                            if ((operationType === "Put" && (reqOp === "PutFullData" || reqOp === "PutPartialData")) ||
+                                (operationType === "Get/Atomic" && (reqOp === "Get" || reqOp === "ArithmeticLogic" || reqOp === "LogicalData")) ||
+                                (operationType === "Intent" && reqOp === "Intent")) {
+                                matchingTxn = txn;
+                                matchingAddr = addr;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (matchingTxn) {
+                    // Add response to transaction
+                    matchingTxn.responses.push(transaction);
+                    
+                    // For simple transactions (non-Grant), we can remove from outstanding
+                    // requests as they don't need an E-Channel acknowledgment
+                    if (this.outstandingRequests.has(hart) && 
+                        this.outstandingRequests.get(hart).has(source) &&
+                        matchingAddr) {
+                        this.outstandingRequests.get(hart).get(source).delete(matchingAddr);
+                    }
+                    
+                    // Update completion stats
+                    this.stats.completeTransactions++;
+                } else {
+                    this.violations.push(
+                        `D-Channel ${transaction.operation} at ${transaction.timestamp} in ${hart} ` +
+                        `with source ${source} has no matching ${operationType} request`
+                    );
+                }
+            }
+            
+            analyzeTransaction(transaction) {
+                const { hart, channel, operation, params } = transaction;
+                
+                // Process A-Channel requests
+                if (channel === "A-Channel") {
+                    if (!('source' in params && 'addr' in params)) {
+                        this.violations.push(
+                            `Missing required parameters in A-Channel ${operation} at ${transaction.timestamp} in ${hart}`
+                        );
+                        return;
+                    }
+                    
+                    const source = params.source;
+                    const addr = params.addr;
+                    const growth = params.growth;
+                    
+                    // Create new transaction for all A-Channel operations
+                    const newTxn = new TileLinkTransaction(transaction);
+                    this.transactions.push(newTxn);
+                    this.stats.totalTransactions++;
+                    
+                    // Store outstanding request for all A-Channel operations
+                    const hartMap = this.getHartMap(this.outstandingRequests, hart);
+                    const sourceMap = this.getSourceMap(hartMap, source);
+                    sourceMap.set(addr, newTxn);
+                    
+                    // Specific handling based on operation type
+                    switch(operation) {
+                        case "PutFullData":
+                            // Access -> Put -> PutFullData
+                            this.stats.accessOps++;
+                            this.stats.putOps++;
+                            this.stats.putFullDataOps++;
+                            break;
+                            
+                        case "PutPartialData":
+                            // Access -> Put -> PutPartialData
+                            this.stats.accessOps++;
+                            this.stats.putOps++;
+                            this.stats.putPartialDataOps++;
+                            break;
+                            
+                        case "ArithmeticLogic":
+                            // Access -> Atomic -> ArithmeticLogic
+                            this.stats.accessOps++;
+                            this.stats.atomicOps++;
+                            this.stats.arithmeticDataOps++;
+                            break;
+                            
+                        case "LogicalData":
+                            // Access -> Atomic -> LogicalData
+                            this.stats.accessOps++;
+                            this.stats.atomicOps++;
+                            this.stats.logicalDataOps++;
+                            break;
+                            
+                        case "Get":
+                            // Access -> Get -> Get
+                            this.stats.accessOps++;
+                            this.stats.getOps++;
+                            this.stats.getRequestOps++;
+                            break;
+                            
+                        case "Intent":
+                            // Hint -> Intent -> Intent
+                            this.stats.hintOps++;
+                            this.stats.intentOps++;
+                            break;
+                            
+                        case "AcquireBlock":
+                            // Transfer -> Acquire -> AcquireBlock
+                            this.stats.transferOps++;
+                            this.stats.acquireOps++;
+                            this.stats.acquireBlockOps++;
+                            break;
+                            
+                        case "AcquirePerm":
+                            // Transfer -> Acquire -> AcquirePerm
+                            this.stats.transferOps++;
+                            this.stats.acquireOps++;
+                            this.stats.acquirePermOps++;
+                            break;
+                            
+                        default:
+                            this.violations.push(
+                                `Unknown A-Channel operation ${operation} at ${transaction.timestamp} in ${hart}`
+                            );
+                    }
+                    
+                    // Check cache state transitions for Acquire operations
+                    if ((operation === "AcquireBlock" || operation === "AcquirePerm") && growth) {
+                        // Get cache state map for this hart
+                        if (!this.cacheStates.has(hart)) {
+                            this.cacheStates.set(hart, new Map());
+                        }
+                        const hartCacheStates = this.cacheStates.get(hart);
+                        
+                        // Setup cache state history for this hart/address
+                        if (!this.cacheStateHistory.has(hart)) {
+                            this.cacheStateHistory.set(hart, new Map());
+                        }
+                        if (!this.cacheStateHistory.get(hart).has(addr)) {
+                            this.cacheStateHistory.get(hart).set(addr, []);
+                        }
+                        const stateHistory = this.cacheStateHistory.get(hart).get(addr);
+                        
+                        // Get current state for this address in this hart
+                        const currentState = hartCacheStates.get(addr) || 'None';
+                        
+                        // Map for transitions allowed by coherence protocol
+                        // NtoB: None -> Branch (first access)
+                        // NtoT: None -> Trunk (unique access)
+                        // BtoT: Branch -> Trunk (upgrade)
+                        // TtoB: Trunk -> Branch (downgrade)
+                        // TtoN: Trunk -> None (eviction/invalidation)
+                        // BtoN: Branch -> None (eviction/invalidation)
+                        const expectedStates = {
+                            'NtoB': ['None'],
+                            'NtoT': ['None'],
+                            'BtoT': ['Branch'],
+                            'TtoB': ['Trunk'],
+                            'TtoN': ['Trunk'],
+                            'BtoN': ['Branch']
+                        };
+                        
+                        // If there's a B-Channel ProbeBlock that affects this address prior to this transaction
+                        // but after the last A-Channel operation on this address, we allow 'None' as a valid
+                        // starting state for any transition, as it could have been invalidated
+                        let probeInvalidatedLine = false;
+                        
+                        // Check for probes that might have invalidated this line
+                        if (currentState !== 'None' && expectedStates[growth][0] === 'None') {
+                            // Find the last state-changing operation for this address
+                            let lastStateChangeTimestamp = 0;
+                            if (stateHistory.length > 0) {
+                                lastStateChangeTimestamp = stateHistory[stateHistory.length - 1].timestamp;
+                            }
+                            
+                            // Look for B-Channel probes to this address
+                            for (const trans of this.parsedTransactions) {
+                                if (trans.timestamp > lastStateChangeTimestamp && 
+                                    trans.timestamp < transaction.timestamp &&
+                                    trans.channel === 'B-Channel' && 
+                                    trans.operation === 'ProbeBlock' &&
+                                    trans.params.addr === addr) {
+                                    probeInvalidatedLine = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // For A-Channel Acquire operations, we trust the initiator knows its state
+                        // We don't validate state transitions for Acquire operations, just record them
+                        
+                        // Only log the transition for debugging purposes
+                        if (expectedStates[growth] && 
+                            !expectedStates[growth].includes(currentState) && 
+                            !probeInvalidatedLine) {
+                            
+                            console.log(`Note: Acquire operation shows ${currentState} -> ${growth} for ${addr} in ${hart}`);
+                            
+                            // We could have missed some operations that changed the state
+                            // For example, Probe operations where the ProbeAck hasn't been processed yet
+                        }
+                        
+                        // Update cache state
+                        const newStateMap = {
+                            'NtoB': 'Branch',
+                            'NtoT': 'Trunk',
+                            'BtoT': 'Trunk',
+                            'TtoB': 'Branch',
+                            'TtoN': 'None',
+                            'BtoN': 'None'
+                        };
+                        
+                        if (newStateMap[growth]) {
+                            // Log the state transition in history
+                            stateHistory.push({
+                                timestamp: transaction.timestamp,
+                                oldState: currentState,
+                                newState: newStateMap[growth],
+                                operation: `${transaction.operation} - ${growth}`,
+                                channel: transaction.channel
+                            });
+                            
+                            // Update current state
+                            hartCacheStates.set(addr, newStateMap[growth]);
+                        }
+                    }
+                }
+                // Process B-Channel operations
+                else if (channel === "B-Channel") {
+                    if (!('addr' in params)) {
+                        this.violations.push(
+                            `B-Channel ${operation} at ${transaction.timestamp} in ${hart} missing address`
+                        );
+                        return;
+                    }
+                    
+                    const addr = params.addr;
+                    const cap = params.cap;
+                    
+                    // Create a tracking object for B-Channel operations
+                    // so we can match them with C-Channel responses later
+                    const probe = {
+                        request: transaction,
+                        response: null
+                    };
+                    
+                    // Store depending on operation type
+                    switch(operation) {
+                        case "ProbeBlock":
+                            // Transfer -> Probe -> ProbeBlock
+                            this.stats.transferOps++;
+                            this.stats.probeOps++;
+                            this.stats.probeBlockOps++;
+                            
+                            // Store the probe request
+                            if (!this.outstandingProbes.has(hart)) {
+                                this.outstandingProbes.set(hart, new Map());
+                            }
+                            if (!this.outstandingProbes.get(hart).has(addr)) {
+                                this.outstandingProbes.get(hart).set(addr, []);
+                            }
+                            this.outstandingProbes.get(hart).get(addr).push(probe);
+                            
+                            // Record in cache state history
+                            if (!this.cacheStateHistory.has(hart)) {
+                                this.cacheStateHistory.set(hart, new Map());
+                            }
+                            if (!this.cacheStateHistory.get(hart).has(addr)) {
+                                this.cacheStateHistory.get(hart).set(addr, []);
+                            }
+                            
+                            this.cacheStateHistory.get(hart).get(addr).push({
+                                timestamp: transaction.timestamp,
+                                operation: `${transaction.operation} - ${cap || ''}`,
+                                channel: transaction.channel,
+                                action: 'Probe received (state change pending ProbeAck)'
+                            });
+                            break;
+                            
+                        case "ProbePerm":
+                            // Transfer -> Probe -> ProbePerm
+                            this.stats.transferOps++;
+                            this.stats.probeOps++;
+                            this.stats.probePermOps++;
+                            
+                            // Store the probe request
+                            if (!this.outstandingProbes.has(hart)) {
+                                this.outstandingProbes.set(hart, new Map());
+                            }
+                            if (!this.outstandingProbes.get(hart).has(addr)) {
+                                this.outstandingProbes.get(hart).set(addr, []);
+                            }
+                            this.outstandingProbes.get(hart).get(addr).push(probe);
+                            break;
+                            
+                        case "PutFullData":
+                            // Access -> Put -> PutFullData
+                            this.stats.accessOps++;
+                            this.stats.putOps++;
+                            this.stats.putFullDataOps++;
+                            break;
+                            
+                        case "PutPartialData":
+                            // Access -> Put -> PutPartialData
+                            this.stats.accessOps++;
+                            this.stats.putOps++;
+                            this.stats.putPartialDataOps++;
+                            break;
+                            
+                        case "ArithmeticData":
+                            // Access -> Atomic -> ArithmeticData
+                            this.stats.accessOps++;
+                            this.stats.atomicOps++;
+                            this.stats.arithmeticDataOps++;
+                            break;
+                            
+                        case "LogicalData":
+                            // Access -> Atomic -> LogicalData
+                            this.stats.accessOps++;
+                            this.stats.atomicOps++;
+                            this.stats.logicalDataOps++;
+                            break;
+                            
+                        case "Get":
+                            // Access -> Get -> Get
+                            this.stats.accessOps++;
+                            this.stats.getOps++;
+                            this.stats.getRequestOps++;
+                            break;
+                            
+                        case "Intent":
+                            // Hint -> Intent -> Intent
+                            this.stats.hintOps++;
+                            this.stats.intentOps++;
+                            break;
+                            
+                        default:
+                            this.violations.push(
+                                `Unknown B-Channel operation ${operation} at ${transaction.timestamp} in ${hart}`
+                            );
+                    }
+                }
+                // Process C-Channel acknowledgments and operations
+                else if (channel === "C-Channel") {
+                    if (!('addr' in params)) {
+                        this.violations.push(
+                            `C-Channel ${operation} at ${transaction.timestamp} in ${hart} missing address`
+                        );
+                        return;
+                    }
+                    
+                    const addr = params.addr;
+                    const growth = params.growth; // Should be like BtoN, TtoB, etc.
+                    
+                    switch(operation) {
+                        // Handle AccessAck - response to A-Channel Put operations
+                        case "AccessAck":
+                            this.stats.accessAckOps++;
+                            break;
+                            
+                        // Handle AccessAckData - response to A-Channel Get/Atomic operations
+                        case "AccessAckData":
+                            this.stats.accessAckDataOps++;
+                            break;
+                            
+                        // Handle HintAck - response to A-Channel Intent operations
+                        case "HintAck":
+                            this.stats.hintAckOps++;
+                            break;
+                    
+                        // Handle ProbeAck/ProbeAckData - response to B-Channel Probe
+                        case "ProbeAck":
+                            this.stats.probeAckOps++;
+                            this.updateCacheStateFromProbe(hart, addr, growth);
+                            break;
+                            
+                        case "ProbeAckData":
+                            this.stats.probeAckDataOps++;
+                            this.updateCacheStateFromProbe(hart, addr, growth);
+                            break;
+                        
+                        // Handle Release/ReleaseData - voluntary cache state downgrade
+                        case "Release":
+                            if (!('source' in params)) {
+                                this.violations.push(
+                                    `C-Channel ${operation} at ${transaction.timestamp} in ${hart} missing source parameter`
+                                );
+                                return;
+                            }
+                            
+                            this.stats.transferOps++;
+                            this.stats.releaseOps++;
+                            this.stats.releaseWithoutDataOps++;
+                            
+                            this.handleReleaseOperation(hart, addr, params.source, transaction, growth);
+                            break;
+                            
+                        case "ReleaseData":
+                            if (!('source' in params)) {
+                                this.violations.push(
+                                    `C-Channel ${operation} at ${transaction.timestamp} in ${hart} missing source parameter`
+                                );
+                                return;
+                            }
+                            
+                            this.stats.transferOps++;
+                            this.stats.releaseOps++;
+                            this.stats.releaseWithDataOps++;
+                            
+                            this.handleReleaseOperation(hart, addr, params.source, transaction, growth);
+                            break;
+                            
+                        default:
+                            this.violations.push(
+                                `Unknown C-Channel operation ${operation} at ${transaction.timestamp} in ${hart}`
+                            );
+                    }
+                }
+                // Process D-Channel responses
+                else if (channel === "D-Channel") {
+                    if (!('source' in params)) {
+                        this.violations.push(
+                            `Missing source parameter in D-Channel ${operation} at ${transaction.timestamp} in ${hart}`
+                        );
+                        return;
+                    }
+                    
+                    const source = params.source;
+                    
+                    switch(operation) {
+                        // Handle Grant/GrantData - response to A-Channel Acquire operations
+                        case "Grant":
+                            this.stats.grantOps++;
+                            
+                            if (!('sink' in params)) {
+                                this.violations.push(
+                                    `Missing sink parameter in D-Channel ${operation} at ${transaction.timestamp} in ${hart}`
+                                );
+                                return;
+                            }
+                            
+                            const sinkGrant = params.sink;
+                            
+                            // Find matching request
+                            let matchingAcquireTxn = null;
+                            
+                            if (this.outstandingRequests.has(hart) && 
+                                this.outstandingRequests.get(hart).has(source)) {
+                                
+                                const sourceMap = this.outstandingRequests.get(hart).get(source);
+                                // Take first matching transaction by source
+                                if (sourceMap.size > 0) {
+                                    for (const [_, txn] of sourceMap) {
+                                        matchingAcquireTxn = txn;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (matchingAcquireTxn) {
+                                // Add response to transaction
+                                matchingAcquireTxn.responses.push(transaction);
+                                
+                                // Store grant for ack matching
+                                const hartMap = this.getHartMap(this.outstandingGrants, hart);
+                                hartMap.set(sinkGrant, matchingAcquireTxn);
+                            } else {
+                                this.violations.push(
+                                    `D-Channel ${operation} at ${transaction.timestamp} in ${hart} ` +
+                                    `with source ${source} has no matching request`
+                                );
+                            }
+                            break;
+                            
+                        case "GrantData":
+                            this.stats.grantDataOps++;
+                            
+                            if (!('sink' in params)) {
+                                this.violations.push(
+                                    `Missing sink parameter in D-Channel ${operation} at ${transaction.timestamp} in ${hart}`
+                                );
+                                return;
+                            }
+                            
+                            const sinkGrantData = params.sink;
+                            
+                            // Find matching request
+                            let matchingGrantDataTxn = null;
+                            
+                            if (this.outstandingRequests.has(hart) && 
+                                this.outstandingRequests.get(hart).has(source)) {
+                                
+                                const sourceMap = this.outstandingRequests.get(hart).get(source);
+                                // Take first matching transaction by source
+                                if (sourceMap.size > 0) {
+                                    for (const [_, txn] of sourceMap) {
+                                        matchingGrantDataTxn = txn;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (matchingGrantDataTxn) {
+                                // Add response to transaction
+                                matchingGrantDataTxn.responses.push(transaction);
+                                
+                                // Store grant for ack matching
+                                const hartMap = this.getHartMap(this.outstandingGrants, hart);
+                                hartMap.set(sinkGrantData, matchingGrantDataTxn);
+                            } else {
+                                this.violations.push(
+                                    `D-Channel ${operation} at ${transaction.timestamp} in ${hart} ` +
+                                    `with source ${source} has no matching request`
+                                );
+                            }
+                            break;
+                            
+                        // Handle AccessAck - response to A-Channel Put operations
+                        case "AccessAck":
+                            this.stats.accessAckOps++;
+                            this.handleGenericDResponse(hart, source, transaction, "Put");
+                            break;
+                            
+                        // Handle AccessAckData - response to A-Channel Get/Atomic operations
+                        case "AccessAckData":
+                            this.stats.accessAckDataOps++;
+                            this.handleGenericDResponse(hart, source, transaction, "Get/Atomic");
+                            break;
+                            
+                        // Handle HintAck - response to A-Channel Intent operations
+                        case "HintAck":
+                            this.stats.hintAckOps++;
+                            this.handleGenericDResponse(hart, source, transaction, "Intent");
+                            break;
+                            
+                        // Handle ReleaseAck - response to C-Channel Release/ReleaseData
+                        case "ReleaseAck":
+                            this.stats.releaseAckOps++;
+                            
+                            // Find matching Release/ReleaseData operation
+                            let matchingRelease = null;
+                            let matchingAddr = null;
+                            
+                            if (this.outstandingReleases.has(hart) && 
+                                this.outstandingReleases.get(hart).has(source)) {
+                                
+                                const sourceMap = this.outstandingReleases.get(hart).get(source);
+                                // Find the first release with this source
+                                if (sourceMap.size > 0) {
+                                    for (const [addr, releaseTxn] of sourceMap) {
+                                        matchingRelease = releaseTxn;
+                                        matchingAddr = addr;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (matchingRelease) {
+                                // Add the ReleaseAck as the response to the Release/ReleaseData
+                                matchingRelease.response = transaction;
+                                
+                                // Remove from outstanding releases
+                                this.outstandingReleases.get(hart).get(source).delete(matchingAddr);
+                            } else {
+                                this.violations.push(
+                                    `D-Channel ${operation} at ${transaction.timestamp} in ${hart} ` +
+                                    `with source ${source} has no matching C-Channel Release/ReleaseData`
+                                );
+                            }
+                            break;
+                            
+                        default:
+                            this.violations.push(
+                                `Unknown D-Channel operation ${operation} at ${transaction.timestamp} in ${hart}`
+                            );
+                    }
+                }
+                // Process E-Channel acknowledgments
+                else if (channel === "E-Channel") {
+                    if (operation === "GrantAck") {
+                        this.stats.grantAckOps++;
+                        
+                        if ('sink' in params) {
+                            const sink = params.sink;
+                            
+                            if (this.outstandingGrants.has(hart) && 
+                                this.outstandingGrants.get(hart).has(sink)) {
+                                
+                                // Get the transaction
+                                const txn = this.outstandingGrants.get(hart).get(sink);
+                                
+                                // Add ack to transaction
+                                txn.ack = transaction;
+                                
+                                // Remove from outstanding grants
+                                this.outstandingGrants.get(hart).delete(sink);
+                                
+                                // Mark transaction as complete
+                                if (txn.isComplete()) {
+                                    this.stats.completeTransactions++;
+                                    
+                                    // Remove request from outstanding requests if complete
+                                    if (txn.request && txn.request.params.source !== undefined) {
+                                        const source = txn.request.params.source;
+                                        const addr = txn.request.params.addr;
+                                        
+                                        if (this.outstandingRequests.has(hart) && 
+                                            this.outstandingRequests.get(hart).has(source) &&
+                                            this.outstandingRequests.get(hart).get(source).has(addr)) {
+                                            
+                                            this.outstandingRequests.get(hart).get(source).delete(addr);
+                                        }
+                                    }
+                                }
+                            } else {
+                                this.violations.push(
+                                    `E-Channel ${operation} at ${transaction.timestamp} in ${hart} ` +
+                                    `with sink ${sink} has no matching grant`
+                                );
+                            }
+                        } else {
+                            this.violations.push(
+                                `Missing required parameters in E-Channel ${operation} at ${transaction.timestamp} in ${hart}`
+                            );
+                        }
+                    }
+                }
+            }
+            
+            checkOutstandingTransactions() {
+                // Check for outstanding A-Channel requests without D-Channel responses
+                for (const [hart, sources] of this.outstandingRequests) {
+                    for (const [source, addrs] of sources) {
+                        for (const [addr, txn] of addrs) {
+                            if (txn.responses.length === 0) {
+                                this.violations.push(
+                                    `A-Channel request at ${txn.request.timestamp} in ${hart} ` +
+                                    `with source ${source} addr ${addr} has no response`
+                                );
+                            }
+                        }
+                    }
+                }
+                
+                // Check for outstanding D-Channel grants without E-Channel acks
+                for (const [hart, sinks] of this.outstandingGrants) {
+                    for (const [sink, txn] of sinks) {
+                        this.violations.push(
+                            `D-Channel grant at ${txn.responses[txn.responses.length-1].timestamp} in ${hart} ` +
+                            `with sink ${sink} has no acknowledgment`
+                        );
+                    }
+                }
+                
+                // Check for outstanding C-Channel Release operations without D-Channel ReleaseAck
+                for (const [hart, sources] of this.outstandingReleases) {
+                    for (const [source, addrs] of sources) {
+                        for (const [addr, releaseTxn] of addrs) {
+                            if (!releaseTxn.response) {
+                                const releaseOp = releaseTxn.request.operation;
+                                this.violations.push(
+                                    `C-Channel ${releaseOp} at ${releaseTxn.request.timestamp} in ${hart} ` +
+                                    `with source ${source} addr ${addr} has no matching D-Channel ReleaseAck`
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            
+            checkChannelOrdering() {
+                // Check that D responses follow A requests and E acks follow D responses
+                for (const txn of this.transactions) {
+                    if (txn.request && txn.responses.length > 0) {
+                        const reqTime = txn.request.timestamp;
+                        const reqHart = txn.request.hart;
+                        
+                        for (const resp of txn.responses) {
+                            const respTime = resp.timestamp;
+                            const respHart = resp.hart;
+                            if (respTime < reqTime) {
+                                this.violations.push(
+                                    `Response at ${respTime} in ${respHart} came before request at ${reqTime} in ${reqHart}`
+                                );
+                            }
+                        }
+                        
+                        if (txn.ack && txn.responses.length > 0) {
+                            const ackTime = txn.ack.timestamp;
+                            const ackHart = txn.ack.hart;
+                            const lastResp = txn.responses.reduce((prev, current) => 
+                                (prev.timestamp > current.timestamp) ? prev : current);
+                            const lastRespTime = lastResp.timestamp;
+                            const lastRespHart = lastResp.hart;
+                            
+                            if (ackTime < lastRespTime) {
+                                this.violations.push(
+                                    `Acknowledgment at ${ackTime} in ${ackHart} came before response at ${lastRespTime} in ${lastRespHart}`
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            
+            analyzeLog(logData) {
+                // Reset state for new analysis
+                this.transactions = [];
+                this.parsedTransactions = [];
+                this.outstandingRequests = new Map();
+                this.outstandingGrants = new Map();
+                this.outstandingProbes = new Map();
+                this.outstandingReleases = new Map();
+                this.cacheStates = new Map();
+                this.cacheStateHistory = new Map();
+                this.violations = [];
+                
+                // Reset statistics
+                this.stats = {
+                    totalTransactions: 0,
+                    completeTransactions: 0,
+                    
+                    // Channel operation counts
+                    aChannelOps: 0,
+                    bChannelOps: 0,
+                    cChannelOps: 0,
+                    dChannelOps: 0,
+                    eChannelOps: 0,
+                    
+                    // Operation categories (top level)
+                    accessOps: 0,
+                    hintOps: 0,
+                    transferOps: 0,
+                    
+                    // Access operations
+                    putOps: 0,    // PutFullData, PutPartialData
+                    getOps: 0,    // Get
+                    atomicOps: 0, // ArithmeticData, LogicalData
+                    
+                    // Specific operations
+                    putFullDataOps: 0,
+                    putPartialDataOps: 0,
+                    getRequestOps: 0,
+                    arithmeticDataOps: 0,
+                    logicalDataOps: 0,
+                    intentOps: 0,
+                    
+                    // Transfer operations
+                    acquireOps: 0,  // AcquireBlock, AcquirePerm
+                    probeOps: 0,    // ProbeBlock, ProbePerm
+                    releaseOps: 0,  // Release, ReleaseData
+                    
+                    // Specific transfer operations
+                    acquireBlockOps: 0,
+                    acquirePermOps: 0,
+                    probeBlockOps: 0,
+                    probePermOps: 0,
+                    releaseWithoutDataOps: 0,
+                    releaseWithDataOps: 0,
+                    
+                    // Response operations
+                    accessAckOps: 0,
+                    accessAckDataOps: 0,
+                    hintAckOps: 0,
+                    grantOps: 0,
+                    grantDataOps: 0,
+                    probeAckOps: 0,
+                    probeAckDataOps: 0,
+                    releaseAckOps: 0,
+                    grantAckOps: 0
+                };
+                
+                const lines = logData.trim().split('\n');
+                
+                for (const line of lines) {
+                    const transaction = this.parseLogLine(line.trim());
+                    if (transaction) {
+                        this.analyzeTransaction(transaction);
+                    }
+                }
+                
+                // Check for outstanding transactions
+                this.checkOutstandingTransactions();
+                
+                // Check operation ordering
+                this.checkChannelOrdering();
+                
+                return {
+                    compliant: this.violations.length === 0,
+                    stats: this.stats,
+                    violations: this.violations,
+                    transactions: this.parsedTransactions
+                };
+            }
+        }
+        
+        // UI Controller
+        document.addEventListener('DOMContentLoaded', () => {
+            const logInput = document.getElementById('logInput');
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const clearBtn = document.getElementById('clearBtn');
+            const exampleBtn = document.getElementById('exampleBtn');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const resultsContainer = document.getElementById('resultsContainer');
+            const statsList = document.getElementById('statsList');
+            const complianceStatus = document.getElementById('complianceStatus');
+            const violationsContainer = document.getElementById('violationsContainer');
+            const violationsList = document.getElementById('violationsList');
+            const transactionsTable = document.getElementById('transactionsTable');
+            
+            const analyzer = new TileLinkAnalyzer();
+            
+            analyzeBtn.addEventListener('click', () => {
+                const logData = logInput.value.trim();
+                if (!logData) {
+                    alert('Please paste TileLink log data first');
+                    return;
+                }
+                
+                // Show loading
+                loadingIndicator.classList.remove('hidden');
+                resultsContainer.classList.add('hidden');
+                
+                // Use setTimeout to allow UI to update before heavy processing
+                setTimeout(() => {
+                    const results = analyzer.analyzeLog(logData);
+                    
+                    // Update stats
+                    statsList.innerHTML = `
+                        <li>Total transactions: ${results.stats.totalTransactions}</li>
+                        <li>Complete transactions: ${results.stats.completeTransactions}</li>
+                        
+                        <li class="mt-2 font-semibold">Channel operations:</li>
+                        <li>A-Channel: ${results.stats.aChannelOps}</li>
+                        <li>B-Channel: ${results.stats.bChannelOps}</li>
+                        <li>C-Channel: ${results.stats.cChannelOps}</li>
+                        <li>D-Channel: ${results.stats.dChannelOps}</li>
+                        <li>E-Channel: ${results.stats.eChannelOps}</li>
+                        
+                        <li class="mt-2 font-semibold">Operation Categories:</li>
+                        <li>Access: ${results.stats.accessOps || 0}</li>
+                        <li>- Put: ${results.stats.putOps || 0}</li>
+                        <li>- Get: ${results.stats.getOps || 0}</li>
+                        <li>- Atomic: ${results.stats.atomicOps || 0}</li>
+                        <li>Hint: ${results.stats.hintOps || 0}</li>
+                        <li>Transfer: ${results.stats.transferOps || 0}</li>
+                        <li>- Acquire: ${results.stats.acquireOps || 0}</li>
+                        <li>- Probe: ${results.stats.probeOps || 0}</li>
+                        <li>- Release: ${results.stats.releaseOps || 0}</li>
+                        
+                        <li class="mt-2 font-semibold">Specific Operations:</li>
+                        <li>PutFullData: ${results.stats.putFullDataOps || 0}</li>
+                        <li>PutPartialData: ${results.stats.putPartialDataOps || 0}</li>
+                        <li>Get: ${results.stats.getRequestOps || 0}</li>
+                        <li>ArithmeticData: ${results.stats.arithmeticDataOps || 0}</li>
+                        <li>LogicalData: ${results.stats.logicalDataOps || 0}</li>
+                        <li>Intent: ${results.stats.intentOps || 0}</li>
+                        <li>AcquireBlock: ${results.stats.acquireBlockOps || 0}</li>
+                        <li>AcquirePerm: ${results.stats.acquirePermOps || 0}</li>
+                        <li>ProbeBlock: ${results.stats.probeBlockOps || 0}</li>
+                        <li>ProbePerm: ${results.stats.probePermOps || 0}</li>
+                        <li>Release: ${results.stats.releaseWithoutDataOps || 0}</li>
+                        <li>ReleaseData: ${results.stats.releaseWithDataOps || 0}</li>
+                    `;
+                    
+                    // Update compliance status
+                    if (results.compliant) {
+                        complianceStatus.innerHTML = '✅ Compliant with TileLink protocol';
+                        complianceStatus.className = 'font-semibold text-green-600 dark:text-green-400';
+                        violationsContainer.classList.add('hidden');
+                    } else {
+                        complianceStatus.innerHTML = '❌ Protocol violations detected';
+                        complianceStatus.className = 'font-semibold text-red-600 dark:text-red-400';
+                        violationsContainer.classList.remove('hidden');
+                        
+                        // Show violations
+                        violationsList.innerHTML = results.violations.map(v => 
+                            `<li>${v}</li>`
+                        ).join('');
+                    }
+                    
+                    // Show transactions
+                    transactionsTable.innerHTML = results.transactions.map(t => `
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                            <td class="px-4 py-2">${t.timestamp.toFixed(2)}</td>
+                            <td class="px-4 py-2">${t.hart}</td>
+                            <td class="px-4 py-2">${t.channel}</td>
+                            <td class="px-4 py-2">${t.operation}</td>
+                            <td class="px-4 py-2">${t.params.addr || '-'}</td>
+                            <td class="px-4 py-2 text-xs font-mono truncate max-w-xs" title="${t.rawParams}">
+                                ${t.rawParams}
+                            </td>
+                        </tr>
+                    `).join('');
+                    
+                    // Hide loading, show results
+                    loadingIndicator.classList.add('hidden');
+                    resultsContainer.classList.remove('hidden');
+                }, 50);
+            });
+            
+            clearBtn.addEventListener('click', () => {
+                logInput.value = '';
+                resultsContainer.classList.add('hidden');
+            });
+            
+            exampleBtn.addEventListener('click', () => {
+                // Load the example log from the question
+                logInput.value = `707254.18 ns Hart0: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000027fe80 corrupt:0 way:0 shareable:1 user:0x079
+707654.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:1 data:0x0000000000003312000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+707679.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:1 data:0x0000000000000000000000000000311000000000000010400000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+707679.18 ns Hart0: E-Channel: GrantAck - sink:1
+710179.18 ns Hart0: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000027ff00 corrupt:0 way:0 shareable:1 user:0x079
+710204.18 ns Hart0: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:1 addr:0x000027ff40 corrupt:0 way:0 shareable:1 user:0x079
+710579.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:3 data:0x00000000000000000000000000000000000000000000000000000000002001d8 denied:0 corrupt:0 shareable:1 user:0x00
+710604.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:3 data:0x0000000000002ffc000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+710604.18 ns Hart0: E-Channel: GrantAck - sink:3
+710629.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:1 sink:19 data:0x0000000000000000000000000000000000000000000000008000000a000078a2 denied:0 corrupt:0 shareable:1 user:0x00
+710654.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:1 sink:19 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+710654.18 ns Hart0: E-Channel: GrantAck - sink:19
+712329.18 ns Hart0: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000027fec0 corrupt:0 way:0 shareable:1 user:0x079
+712754.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:22 data:0x000000000028000000000000000002000000000000000048ffffffffc1cdcd65 denied:0 corrupt:0 shareable:1 user:0x00
+712779.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:22 data:0x0000000000002e36000000000020025800000000002800000000000000300000 denied:0 corrupt:0 shareable:1 user:0x00
+712779.18 ns Hart0: E-Channel: GrantAck - sink:22
+716354.18 ns Hart0: A-Channel: AcquireBlock - NtoT (1) - Grow from None to Trunk size:6 source:0 addr:0x000027ff80 corrupt:0 way:0 shareable:1 user:0x079
+716754.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:7 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+716779.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:7 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+716779.18 ns Hart0: E-Channel: GrantAck - sink:7
+717104.18 ns Hart0: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000300000 corrupt:0 way:0 shareable:1 user:0x079
+717504.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:8 data:0x0000000000000000000000000000000000000000000000000000000000000001 denied:0 corrupt:0 shareable:1 user:0x00
+717529.18 ns Hart0: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:8 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x00
+717529.18 ns Hart0: E-Channel: GrantAck - sink:8
+726829.18 ns Hart1: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000287e80 corrupt:0 way:0 shareable:1 user:0x079
+727079.18 ns Hart2: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000028fe80 corrupt:0 way:0 shareable:1 user:0x079
+727229.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:13 data:0x0000000000001040000000000000000000000000000033120000000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+727254.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:13 data:0x000000000000004800000000000031a400000000000000000000000000003110 denied:0 corrupt:0 shareable:1 user:0x04
+727254.18 ns Hart1: E-Channel: GrantAck - sink:13
+727329.18 ns Hart3: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000297e80 corrupt:0 way:0 shareable:1 user:0x079
+727679.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:14 data:0x0000000000001040000000000000000000000000000033120000000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+727704.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:14 data:0x000000000000004800000000000031a400000000000000000000000000003110 denied:0 corrupt:0 shareable:1 user:0x08
+727704.18 ns Hart2: E-Channel: GrantAck - sink:14
+728129.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:15 data:0x0000000000001040000000000000000000000000000033120000000000000000 denied:0 corrupt:0 shareable:1 user:0x0c
+728154.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:15 data:0x000000000000004800000000000031a400000000000000000000000000003110 denied:0 corrupt:0 shareable:1 user:0x0c
+728154.18 ns Hart3: E-Channel: GrantAck - sink:15
+729529.18 ns Hart1: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000287f00 corrupt:0 way:0 shareable:1 user:0x079
+729929.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:3 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+729954.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:3 data:0x00000000000000008000000a000078a20000000000002ffc0000000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+729954.18 ns Hart1: E-Channel: GrantAck - sink:3
+730029.18 ns Hart2: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000028ff00 corrupt:0 way:0 shareable:1 user:0x079
+730429.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:4 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+730429.18 ns Hart3: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000297f00 corrupt:0 way:0 shareable:1 user:0x079
+730454.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:4 data:0x00000000000000008000000a000078a20000000000002ffc0000000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+730454.18 ns Hart2: E-Channel: GrantAck - sink:4
+730879.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:5 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x0c
+730904.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:5 data:0x00000000000000008000000a000078a20000000000002ffc0000000000000000 denied:0 corrupt:0 shareable:1 user:0x0c
+730904.18 ns Hart3: E-Channel: GrantAck - sink:5
+731779.18 ns Hart1: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000287ec0 corrupt:0 way:0 shareable:1 user:0x079
+732179.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:25 data:0x0000000000000000000000000000000000000000000000000000000000000200 denied:0 corrupt:0 shareable:1 user:0x04
+732204.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:25 data:0x000000000000000000000000002001d80000000000002e361002000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+732204.18 ns Hart1: E-Channel: GrantAck - sink:25
+732279.18 ns Hart2: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x000028fec0 corrupt:0 way:0 shareable:1 user:0x079
+732679.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:27 data:0x0000000000000000000000000000000000000000000000000000000000000200 denied:0 corrupt:0 shareable:1 user:0x08
+732679.18 ns Hart3: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000297ec0 corrupt:0 way:0 shareable:1 user:0x079
+732704.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:27 data:0x000000000000000000000000002001d80000000000002e361002000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+732704.18 ns Hart2: E-Channel: GrantAck - sink:27
+733129.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:28 data:0x0000000000000000000000000000000000000000000000000000000000000200 denied:0 corrupt:0 shareable:1 user:0x0c
+733154.18 ns Hart3: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:28 data:0x000000000000000000000000002001d80000000000002e361002000000000000 denied:0 corrupt:0 shareable:1 user:0x0c
+733154.18 ns Hart3: E-Channel: GrantAck - sink:28
+735104.18 ns Hart1: A-Channel: AcquireBlock - NtoT (1) - Grow from None to Trunk size:6 source:0 addr:0x0000287f80 corrupt:0 way:0 shareable:1 user:0x079
+735504.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:13 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+735529.18 ns Hart1: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:13 data:0x0000000000003110000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x04
+735529.18 ns Hart1: E-Channel: GrantAck - sink:13
+735554.18 ns Hart2: A-Channel: AcquireBlock - NtoT (1) - Grow from None to Trunk size:6 source:0 addr:0x000028ff80 corrupt:0 way:0 shareable:1 user:0x079
+735729.18 ns Hart1: A-Channel: AcquireBlock - NtoB (0) - Grow from None to Branch size:6 source:0 addr:0x0000300000 corrupt:0 way:0 shareable:1 user:0x079
+735904.18 ns Hart0: B-Channel: ProbeBlock - toB (1) - Cap to Branch size:6 source:0 addr:0x0000300000 data:0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx mask:0xffffffff corrupt:0
+735979.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:1 data:0x0000000000000000000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+736004.18 ns Hart2: D-Channel: GrantData - toT (0) - Cap to Trunk size:6 source:0 sink:1 data:0x0000000000003110000000000000000000000000000000000000000000000000 denied:0 corrupt:0 shareable:1 user:0x08
+736004.18 ns Hart2: E-Channel: GrantAck - sink:1`;
+            });
+        });
+    </script>
+</body>
+</html>
