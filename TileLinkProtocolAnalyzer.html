@@ -88,7 +88,9 @@
                                 <th class="px-4 py-2 text-left">Channel</th>
                                 <th class="px-4 py-2 text-left">Operation</th>
                                 <th class="px-4 py-2 text-left">Address</th>
-                                <th class="px-4 py-2 text-left">Details</th>
+                                <th class="px-4 py-2 text-left">Source</th>
+                                <th class="px-4 py-2 text-left">Sink</th>
+                                <th class="px-4 py-2 text-left">State Trans</th>
                             </tr>
                         </thead>
                         <tbody id="transactionsTable" class="divide-y dark:divide-gray-700"></tbody>
@@ -1285,18 +1287,27 @@
                     }
                     
                     // Show transactions
-                    transactionsTable.innerHTML = results.transactions.map(t => `
+                    transactionsTable.innerHTML = results.transactions.map(t => {
+                        // Extract state transition (growth or cap parameter)
+                        let stateTrans = "-";
+                        if (t.params.growth) {
+                            stateTrans = t.params.growth;
+                        } else if (t.params.cap) {
+                            stateTrans = t.params.cap;
+                        }
+                        
+                        return `
                         <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
                             <td class="px-4 py-2">${t.timestamp.toFixed(2)}</td>
                             <td class="px-4 py-2">${t.hart}</td>
                             <td class="px-4 py-2">${t.channel}</td>
                             <td class="px-4 py-2">${t.operation}</td>
                             <td class="px-4 py-2">${t.params.addr || '-'}</td>
-                            <td class="px-4 py-2 text-xs font-mono truncate max-w-xs" title="${t.rawParams}">
-                                ${t.rawParams}
-                            </td>
+                            <td class="px-4 py-2">${t.params.source !== undefined ? t.params.source : '-'}</td>
+                            <td class="px-4 py-2">${t.params.sink !== undefined ? t.params.sink : '-'}</td>
+                            <td class="px-4 py-2">${stateTrans}</td>
                         </tr>
-                    `).join('');
+                    `}).join('');
                     
                     // Hide loading, show results
                     loadingIndicator.classList.add('hidden');
