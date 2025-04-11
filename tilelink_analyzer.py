@@ -47,7 +47,7 @@ class TileLinkAnalyzer:
             "completeTransactions": 0,
             
             # Channel operation counts
-            "aChannelOps": A0,
+            "aChannelOps": 0,
             "bChannelOps": 0,
             "cChannelOps": 0,
             "dChannelOps": 0,
@@ -992,7 +992,7 @@ class TileLinkAnalyzer:
         
         # Transaction log section
         output.append("\n=== Transaction Log ===")
-        output.append("Time (ns)      | Hart  | Channel     | Operation      | Address      | Details")
+        output.append("Time (ns)     |  Hart  | Channel      | Operation      | Address      | Source | Sink  | State Trans")
         output.append("-" * 100)
         
         for txn in results["transactions"]:
@@ -1001,9 +1001,20 @@ class TileLinkAnalyzer:
             channel_str = txn["channel"].ljust(13)
             operation_str = txn["operation"].ljust(15)
             addr_str = txn["params"].get("addr", "-").ljust(13)
-            details = txn["rawParams"][:60] + "..." if len(txn["rawParams"]) > 60 else txn["rawParams"]
             
-            output.append(f"{time_str}| {hart_str}| {channel_str}| {operation_str}| {addr_str}| {details}")
+            # Extract source and sink
+            source_str = str(txn["params"].get("source", "-")).ljust(7)
+            sink_str = str(txn["params"].get("sink", "-")).ljust(6)
+            
+            # Extract state transition (growth or cap parameter)
+            state_trans = "-"
+            if "growth" in txn["params"]:
+                state_trans = txn["params"]["growth"]
+            elif "cap" in txn["params"]:
+                state_trans = txn["params"]["cap"]
+            state_trans_str = state_trans.ljust(13)
+            
+            output.append(f"{time_str}| {hart_str}| {channel_str}| {operation_str}| {addr_str}| {source_str}| {sink_str}| {state_trans_str}")
         
         return "\n".join(output)
 
